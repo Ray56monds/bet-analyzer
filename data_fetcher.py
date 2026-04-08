@@ -22,7 +22,6 @@ except ImportError:
     REQUESTS_OK = False
 
 from models import Game, Sport, TeamStats, HeadToHead
-import sample_data as demo
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -324,15 +323,16 @@ def _default_basketball_odds(home_rank: int, away_rank: int) -> dict:
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def get_today_football_games() -> list[Game]:
+    """Live football fixtures only. Returns empty list if none today."""
     if not _api_key():
-        print("[INFO] No API key — using demo football data.")
-        return demo.FOOTBALL_GAMES
+        print("[INFO] No API_FOOTBALL_KEY set — football disabled.")
+        return []
 
     print(f"[API] Fetching today's football fixtures ({datetime.date.today()})…")
     raw = fetch_today_football_fixtures()
     if not raw:
-        print("[API] No football fixtures today — using demo data.")
-        return demo.FOOTBALL_GAMES
+        print("[API] No football fixtures scheduled today.")
+        return []
 
     print(f"[API] {len(raw)} football fixture(s) found.")
     games, seen = [], set()
@@ -348,15 +348,15 @@ def get_today_football_games() -> list[Game]:
             home  = fix["teams"]["home"]
             away  = fix["teams"]["away"]
 
-            h2h      = fetch_football_h2h(home["id"], away["id"])
-            h_stats  = fetch_football_team_stats(lid, home["id"])
-            a_stats  = fetch_football_team_stats(lid, away["id"])
-            h_form   = _parse_football_form(h2h, home["id"]) or ["W","D","W","L","W"]
-            a_form   = _parse_football_form(h2h, away["id"]) or ["L","W","L","D","L"]
+            h2h     = fetch_football_h2h(home["id"], away["id"])
+            h_stats = fetch_football_team_stats(lid, home["id"])
+            a_stats = fetch_football_team_stats(lid, away["id"])
+            h_form  = _parse_football_form(h2h, home["id"]) or ["W","D","W","L","W"]
+            a_form  = _parse_football_form(h2h, away["id"]) or ["L","W","L","D","L"]
 
-            rnd     = fix.get("league", {}).get("round", "10").split("-")[-1].strip()
-            h_rank  = int(rnd) if rnd.isdigit() else 10
-            a_rank  = h_rank + 3
+            rnd    = fix.get("league", {}).get("round", "10").split("-")[-1].strip()
+            h_rank = int(rnd) if rnd.isdigit() else 10
+            a_rank = h_rank + 3
 
             games.append(Game(
                 id=f"live_{fid}",
@@ -371,42 +371,40 @@ def get_today_football_games() -> list[Game]:
             print(f"[WARN] Skipping football fixture: {e}")
 
     print(f"[API] Built {len(games)} football game(s).")
-    return games or demo.FOOTBALL_GAMES
+    return games
 
 
 def get_today_basketball_games() -> list[Game]:
+    """Live basketball games only. Returns empty list if none today."""
     if not _api_key():
-        print("[INFO] No API key — using demo basketball data.")
-        return demo.BASKETBALL_GAMES
+        print("[INFO] No API_FOOTBALL_KEY set — basketball disabled.")
+        return []
 
     print(f"[API] Fetching today's basketball games ({datetime.date.today()})…")
     raw = fetch_today_basketball_fixtures()
-
     if not raw:
-        print("[API] No basketball games today — using demo data.")
-        return demo.BASKETBALL_GAMES
+        print("[API] No basketball games scheduled today.")
+        return []
 
     print(f"[API] {len(raw)} basketball game(s) found.")
     games, seen = [], set()
 
     for g in raw:
         try:
-            gid    = g["id"]
+            gid   = g["id"]
             if gid in seen: continue
             seen.add(gid)
 
-            lid    = g["league"]["id"]
-            lname  = WATCHED_BASKETBALL_LEAGUES.get(lid, ("Basketball",))[0]
-            home   = g["teams"]["home"]
-            away   = g["teams"]["away"]
+            lid   = g["league"]["id"]
+            lname = WATCHED_BASKETBALL_LEAGUES.get(lid, ("Basketball",))[0]
+            home  = g["teams"]["home"]
+            away  = g["teams"]["away"]
 
             h_stats = fetch_basketball_team_stats(lid, home["id"])
             a_stats = fetch_basketball_team_stats(lid, away["id"])
 
-            # Rank by standing position if available, else default
-            h_rank = _safe(home.get("standing", {}).get("position")) or 8
-            a_rank = _safe(away.get("standing", {}).get("position")) or 8
-            h_rank, a_rank = int(h_rank), int(a_rank)
+            h_rank = int(_safe(home.get("standing", {}).get("position")) or 8)
+            a_rank = int(_safe(away.get("standing", {}).get("position")) or 8)
 
             games.append(Game(
                 id=f"live_bb_{gid}",
@@ -421,12 +419,9 @@ def get_today_basketball_games() -> list[Game]:
             print(f"[WARN] Skipping basketball game: {e}")
 
     print(f"[API] Built {len(games)} basketball game(s).")
-    return games or demo.BASKETBALL_GAMES
+    return games
 
 
 def get_all_today_games() -> list[Game]:
-    """All sports: live football + live basketball + demo tennis."""
-    football   = get_today_football_games()
-    basketball = get_today_basketball_games()
-    tennis     = demo.TENNIS_MATCHES
-    return football + basketball + tennis
+    """All live sports combined — no demo/static data."""
+    return get_today_football_games() + get_today_basketball_games()

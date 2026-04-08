@@ -33,7 +33,7 @@ async function runAnalysis() {
     document.getElementById('stat-games').textContent = data.total_games;
     document.getElementById('stat-bets').textContent  = data.total_recommended;
 
-    renderBetsTable(currentBets);
+    renderBetsTable(currentBets, data.total_games);
     renderSmartSlips(data.smart_slips || [], stake);
     closeDetail();
   } catch (err) {
@@ -45,17 +45,25 @@ async function runAnalysis() {
 }
 
 /* ── Render bets table ────────────────────────────────────── */
-function renderBetsTable(bets) {
-  const tbody = document.getElementById('bets-tbody');
-  const noMsg = document.getElementById('no-bets');
-  const wrap  = document.getElementById('bets-table-wrap');
+function renderBetsTable(bets, totalGames) {
+  const tbody   = document.getElementById('bets-tbody');
+  const noGames = document.getElementById('no-games');
+  const noBets  = document.getElementById('no-bets');
+  const wrap    = document.getElementById('bets-table-wrap');
 
-  if (!bets.length) {
-    wrap.classList.add('d-none');
-    noMsg.classList.remove('d-none');
+  // Hide all states first
+  noGames.classList.add('d-none');
+  noBets.classList.add('d-none');
+  wrap.classList.add('d-none');
+
+  if (totalGames === 0) {
+    noGames.classList.remove('d-none');
     return;
   }
-  noMsg.classList.add('d-none');
+  if (!bets.length) {
+    noBets.classList.remove('d-none');
+    return;
+  }
   wrap.classList.remove('d-none');
 
   tbody.innerHTML = bets.map((b, i) => {

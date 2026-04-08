@@ -1,14 +1,13 @@
 """
-Live data fetcher using API-Football (api-sports.io).
+Live data fetcher using api-sports.io.
+The SAME API key works for both football and basketball.
 
-Free tier: 100 requests/day — https://dashboard.api-football.com/register
+Football:   https://v3.football.api-sports.io
+Basketball: https://v1.basketball.api-sports.io
+
+Free tier: 100 requests/day per sport.
 Set API_FOOTBALL_KEY in your .env file.
-
-Falls back to sample_data if no key is configured.
-
-Supported:
-  - Football: today's fixtures + team stats + H2H
-  - Basketball/Tennis: sample data (live APIs are sport-specific paid tiers)
+Falls back to sample data when no key is set or no games are found today.
 """
 
 import os
@@ -27,26 +26,36 @@ import sample_data as demo
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-BASE_URL = "https://v3.football.api-sports.io"
+FOOTBALL_BASE   = "https://v3.football.api-sports.io"
+BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
+
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-# Top leagues to pull today's fixtures from (League IDs on api-football.com)
-WATCHED_LEAGUES = {
-    39:  ("Premier League",   "England"),
-    140: ("La Liga",          "Spain"),
-    78:  ("Bundesliga",       "Germany"),
-    135: ("Serie A",          "Italy"),
-    61:  ("Ligue 1",          "France"),
-    2:   ("Champions League", "UEFA"),
-    3:   ("Europa League",    "UEFA"),
-    848: ("Conference League","UEFA"),
-    94:  ("Primeira Liga",    "Portugal"),
-    88:  ("Eredivisie",       "Netherlands"),
+WATCHED_FOOTBALL_LEAGUES = {
+    39:  ("Premier League",    "England"),
+    140: ("La Liga",           "Spain"),
+    78:  ("Bundesliga",        "Germany"),
+    135: ("Serie A",           "Italy"),
+    61:  ("Ligue 1",           "France"),
+    2:   ("Champions League",  "UEFA"),
+    3:   ("Europa League",     "UEFA"),
+    848: ("Conference League", "UEFA"),
+    94:  ("Primeira Liga",     "Portugal"),
+    88:  ("Eredivisie",        "Netherlands"),
 }
 
-CURRENT_SEASON = 2024
+WATCHED_BASKETBALL_LEAGUES = {
+    12:  ("NBA",        "USA"),
+    120: ("Euroleague", "Europe"),
+    13:  ("NBL",        "Australia"),
+}
 
+FOOTBALL_SEASON   = 2025        # 2025-2026 European season
+BASKETBALL_SEASON = "2025-2026"  # Current NBA season
+
+
+# ── Core HTTP ─────────────────────────────────────────────────────────────────
 
 def _api_key() -> str | None:
     key = os.getenv("API_FOOTBALL_KEY", "")
@@ -62,310 +71,362 @@ def _load_cache(name: str):
     p = _cache_path(name)
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
     return None
 
 
 def _save_cache(name: str, data):
-    _cache_path(name).write_text(json.dumps(data))
+    _cache_path(name).write_text(json.dumps(data), encoding="utf-8")
 
 
-def _get(endpoint: str, params: dict) -> dict | None:
+def _get(base_url: str, endpoint: str, params: dict) -> dict | None:
     key = _api_key()
     if not key or not REQUESTS_OK:
         return None
     try:
         resp = requests.get(
-            f"{BASE_URL}/{endpoint}",
+            f"{base_url}/{endpoint}",
             headers={"x-apisports-key": key},
             params=params,
             timeout=10,
         )
         if resp.status_code == 200:
             return resp.json()
+        print(f"[API] {endpoint} → HTTP {resp.status_code}")
     except Exception as e:
-        print(f"[API] Request failed: {e}")
+        print(f"[API] Request failed ({endpoint}): {e}")
     return None
 
 
-# ── Fixture fetching ──────────────────────────────────────────────────────────
+def _fg(endpoint, params): return _get(FOOTBALL_BASE,   endpoint, params)
+def _bg(endpoint, params): return _get(BASKETBALL_BASE, endpoint, params)
 
-def fetch_today_fixtures() -> list[dict]:
-    """Return raw fixture dicts for today from watched leagues."""
-    cache_name = "fixtures_today"
-    cached = _load_cache(cache_name)
+
+# ── Football fetchers ─────────────────────────────────────────────────────────
+
+def fetch_today_football_fixtures() -> list[dict]:
+    cached = _load_cache("fb_fixtures_today")
     if cached is not None:
         return cached
 
     today = datetime.date.today().isoformat()
-    all_fixtures = []
-
-    for league_id in WATCHED_LEAGUES:
-        data = _get("fixtures", {"date": today, "league": league_id, "status": "NS"})
+    results = []
+    for league_id in WATCHED_FOOTBALL_LEAGUES:
+        data = _fg("fixtures", {"date": today, "league": league_id, "status": "NS"})
         if data and "response" in data:
-            all_fixtures.extend(data["response"])
+            results.extend(data["response"])
 
-    if all_fixtures:
-        _save_cache(cache_name, all_fixtures)
+    if results:
+        _save_cache("fb_fixtures_today", results)
+    return results
 
-    return all_fixtures
 
-
-def fetch_team_stats(league_id: int, team_id: int) -> dict | None:
-    cache_name = f"stats_{league_id}_{team_id}"
-    cached = _load_cache(cache_name)
+def fetch_football_team_stats(league_id: int, team_id: int) -> dict | None:
+    name = f"fb_stats_{league_id}_{team_id}"
+    cached = _load_cache(name)
     if cached is not None:
         return cached
-
-    data = _get("teams/statistics", {
-        "league": league_id,
-        "season": CURRENT_SEASON,
-        "team": team_id,
-    })
+    data = _fg("teams/statistics", {"league": league_id, "season": FOOTBALL_SEASON, "team": team_id})
     if data and "response" in data:
-        _save_cache(cache_name, data["response"])
+        _save_cache(name, data["response"])
         return data["response"]
     return None
 
 
-def fetch_h2h(team1_id: int, team2_id: int, last: int = 10) -> list[dict]:
-    cache_name = f"h2h_{team1_id}_{team2_id}"
-    cached = _load_cache(cache_name)
+def fetch_football_h2h(team1_id: int, team2_id: int) -> list[dict]:
+    name = f"fb_h2h_{team1_id}_{team2_id}"
+    cached = _load_cache(name)
     if cached is not None:
         return cached
-
-    data = _get("fixtures/headtohead", {"h2h": f"{team1_id}-{team2_id}", "last": last})
-    fixtures = []
-    if data and "response" in data:
-        fixtures = data["response"]
-        _save_cache(cache_name, fixtures)
+    data = _fg("fixtures/headtohead", {"h2h": f"{team1_id}-{team2_id}", "last": 10})
+    fixtures = data["response"] if data and "response" in data else []
+    if fixtures:
+        _save_cache(name, fixtures)
     return fixtures
 
 
-# ── Data mapping ──────────────────────────────────────────────────────────────
+# ── Basketball fetchers ───────────────────────────────────────────────────────
 
-def _parse_form(fixtures: list[dict], team_id: int, last: int = 5) -> list[str]:
-    """Extract W/D/L form from a list of played fixtures."""
+def fetch_today_basketball_fixtures() -> list[dict]:
+    cached = _load_cache("bb_games_today")
+    if cached is not None:
+        return cached
+
+    today = datetime.date.today().isoformat()
+    # Fetch ALL games today (no league filter — avoids the mandatory season param issue)
+    # then filter to watched leagues in the caller
+    data = _bg("games", {"date": today})
+    results = []
+    if data and "response" in data:
+        watched_ids = set(WATCHED_BASKETBALL_LEAGUES.keys())
+        results = [g for g in data["response"] if g.get("league", {}).get("id") in watched_ids]
+
+    if results:
+        _save_cache("bb_games_today", results)
+    return results
+
+
+def fetch_basketball_team_stats(league_id: int, team_id: int) -> dict | None:
+    name = f"bb_stats_{league_id}_{team_id}"
+    cached = _load_cache(name)
+    if cached is not None:
+        return cached
+    data = _bg("teams/statistics", {"league": league_id, "season": BASKETBALL_SEASON, "team": team_id})
+    if data and "response" in data and data["response"]:
+        result = data["response"][0] if isinstance(data["response"], list) else data["response"]
+        _save_cache(name, result)
+        return result
+    return None
+
+
+# ── Data mapping helpers ──────────────────────────────────────────────────────
+
+def _safe(val, default=0.0) -> float:
+    return float(val) if val is not None else default
+
+
+def _parse_football_form(fixtures: list[dict], team_id: int, last: int = 5) -> list[str]:
     form = []
     played = [f for f in fixtures if f.get("fixture", {}).get("status", {}).get("short") == "FT"]
     for fix in played[-last:]:
         home_id = fix["teams"]["home"]["id"]
-        home_goals = fix["goals"]["home"] or 0
-        away_goals = fix["goals"]["away"] or 0
+        hg = fix["goals"]["home"] or 0
+        ag = fix["goals"]["away"] or 0
         if home_id == team_id:
-            form.append("W" if home_goals > away_goals else ("D" if home_goals == away_goals else "L"))
+            form.append("W" if hg > ag else ("D" if hg == ag else "L"))
         else:
-            form.append("W" if away_goals > home_goals else ("D" if home_goals == away_goals else "L"))
+            form.append("W" if ag > hg else ("D" if hg == ag else "L"))
     return form
 
 
-def _safe(val, default=0.0):
-    return float(val) if val is not None else default
-
-
-def _build_team_stats(name: str, rank: int, stats: dict | None, form: list[str]) -> TeamStats:
-    """Map API team statistics to our TeamStats model."""
+def _build_football_team(name: str, rank: int, stats: dict | None, form: list[str]) -> TeamStats:
     if stats is None:
-        # Fallback: estimate by rank (lower rank = weaker team)
         base = max(0.5, 2.0 - rank * 0.05)
         return TeamStats(
             name=name, form=form,
             avg_scored=base, avg_conceded=2.5 - base,
-            home_avg_scored=base + 0.2, home_avg_conceded=max(0.3, 2.5 - base - 0.2),
-            away_avg_scored=max(0.3, base - 0.2), away_avg_conceded=2.5 - base + 0.2,
+            home_avg_scored=base + 0.2, home_avg_conceded=max(0.3, 2.3 - base),
+            away_avg_scored=max(0.3, base - 0.2), away_avg_conceded=2.7 - base,
             rank=rank,
             ht_avg_scored=base * 0.42, ht_avg_conceded=(2.5 - base) * 0.42,
         )
 
     goals = stats.get("goals", {})
-    scored_avg = _safe(goals.get("for", {}).get("average", {}).get("total"))
-    conceded_avg = _safe(goals.get("against", {}).get("average", {}).get("total"))
+    s_avg  = _safe(goals.get("for",     {}).get("average", {}).get("total")) or 1.2
+    c_avg  = _safe(goals.get("against", {}).get("average", {}).get("total")) or 1.2
+    s_home = _safe(goals.get("for",     {}).get("average", {}).get("home"))  or s_avg
+    c_home = _safe(goals.get("against", {}).get("average", {}).get("home"))  or c_avg
+    s_away = _safe(goals.get("for",     {}).get("average", {}).get("away"))  or s_avg
+    c_away = _safe(goals.get("against", {}).get("average", {}).get("away"))  or c_avg
 
-    scored_home = _safe(goals.get("for", {}).get("average", {}).get("home"))
-    conceded_home = _safe(goals.get("against", {}).get("average", {}).get("home"))
-    scored_away = _safe(goals.get("for", {}).get("average", {}).get("away"))
-    conceded_away = _safe(goals.get("against", {}).get("average", {}).get("away"))
-
-    # First half goals (minute 0-45)
-    ht_scored = _safe(goals.get("for", {}).get("minute", {}).get("0-15", {}).get("total", 0)) / 15 * 45 if False else scored_avg * 0.42
-    ht_conceded = conceded_avg * 0.42
-
-    # Better: use "minute" breakdown if available
-    minute_for = goals.get("for", {}).get("minute", {})
-    if minute_for:
-        ht_buckets = ["0-15", "16-30", "31-45"]
-        ht_scored_total = sum(
-            _safe(minute_for.get(b, {}).get("total", 0)) for b in ht_buckets
-        )
-        played_total = _safe(stats.get("fixtures", {}).get("played", {}).get("total", 1)) or 1
-        ht_scored = ht_scored_total / played_total
-
-    minute_against = goals.get("against", {}).get("minute", {})
-    if minute_against:
-        ht_buckets = ["0-15", "16-30", "31-45"]
-        ht_conceded_total = sum(
-            _safe(minute_against.get(b, {}).get("total", 0)) for b in ht_buckets
-        )
-        played_total = _safe(stats.get("fixtures", {}).get("played", {}).get("total", 1)) or 1
-        ht_conceded = ht_conceded_total / played_total
+    # First-half goals from minute breakdown
+    ht_s = s_avg * 0.42
+    ht_c = c_avg * 0.42
+    m_for = goals.get("for", {}).get("minute", {})
+    m_vs  = goals.get("against", {}).get("minute", {})
+    played = _safe(stats.get("fixtures", {}).get("played", {}).get("total", 1)) or 1
+    if m_for:
+        ht_s = sum(_safe(m_for.get(b, {}).get("total", 0)) for b in ["0-15", "16-30", "31-45"]) / played
+    if m_vs:
+        ht_c = sum(_safe(m_vs.get(b, {}).get("total", 0)) for b in ["0-15", "16-30", "31-45"]) / played
 
     return TeamStats(
         name=name, form=form,
-        avg_scored=scored_avg or 1.2,
-        avg_conceded=conceded_avg or 1.2,
-        home_avg_scored=scored_home or scored_avg or 1.3,
-        home_avg_conceded=conceded_home or conceded_avg or 1.1,
-        away_avg_scored=scored_away or scored_avg or 1.1,
-        away_avg_conceded=conceded_away or conceded_avg or 1.3,
+        avg_scored=s_avg, avg_conceded=c_avg,
+        home_avg_scored=s_home, home_avg_conceded=c_home,
+        away_avg_scored=s_away, away_avg_conceded=c_away,
         rank=rank,
-        ht_avg_scored=ht_scored,
-        ht_avg_conceded=ht_conceded,
+        ht_avg_scored=ht_s, ht_avg_conceded=ht_c,
     )
 
 
-def _build_h2h(fixtures: list[dict], home_id: int) -> HeadToHead:
-    """Compute H2H stats from raw fixture list."""
+def _build_basketball_team(name: str, rank: int, stats: dict | None, form: list[str]) -> TeamStats:
+    if stats is None:
+        # Rough NBA averages by rank
+        pts = max(100.0, 118.0 - rank * 0.8)
+        opp = min(125.0, 108.0 + rank * 0.5)
+        return TeamStats(
+            name=name, form=form,
+            avg_scored=pts, avg_conceded=opp,
+            home_avg_scored=pts + 3.0, home_avg_conceded=opp - 2.0,
+            away_avg_scored=pts - 3.0, away_avg_conceded=opp + 2.0,
+            rank=rank,
+            ht_avg_scored=pts * 0.48, ht_avg_conceded=opp * 0.48,
+        )
+
+    games   = _safe(stats.get("games",  {}).get("played", {}).get("all"))  or 1
+    pts_for = _safe(stats.get("points", {}).get("for",     {}).get("total", {}).get("all")) / games
+    pts_vs  = _safe(stats.get("points", {}).get("against", {}).get("total", {}).get("all")) / games
+
+    pts_for = pts_for or 110.0
+    pts_vs  = pts_vs  or 110.0
+
+    return TeamStats(
+        name=name, form=form,
+        avg_scored=pts_for, avg_conceded=pts_vs,
+        home_avg_scored=pts_for + 3.0, home_avg_conceded=pts_vs - 2.0,
+        away_avg_scored=pts_for - 3.0, away_avg_conceded=pts_vs + 2.0,
+        rank=rank,
+        ht_avg_scored=pts_for * 0.48, ht_avg_conceded=pts_vs * 0.48,
+    )
+
+
+def _build_football_h2h(fixtures: list[dict], home_id: int) -> HeadToHead:
     total = len(fixtures)
     if total == 0:
         return HeadToHead(0, 0, 0, 0, 2.5, 1.0)
-
-    home_wins = away_wins = draws = 0
-    total_goals = total_ht_goals = 0
-
+    hw = aw = draws = tg = tht = 0
     for fix in fixtures:
-        fhome_id = fix["teams"]["home"]["id"]
+        fhome = fix["teams"]["home"]["id"]
         hg = fix["goals"]["home"] or 0
         ag = fix["goals"]["away"] or 0
-        total_goals += hg + ag
-
-        # Rough first half estimate (API score object doesn't always have halftime)
-        ht_score = fix.get("score", {}).get("halftime", {})
-        ht_h = ht_score.get("home") or 0
-        ht_a = ht_score.get("away") or 0
-        total_ht_goals += (ht_h + ht_a) if (ht_h + ht_a) > 0 else (hg + ag) * 0.42
-
+        tg += hg + ag
+        ht = fix.get("score", {}).get("halftime", {})
+        tht += (ht.get("home") or 0) + (ht.get("away") or 0) or (hg + ag) * 0.42
         winner = fix["teams"]["home"]["winner"]
         if winner is None:
             draws += 1
-        elif (fhome_id == home_id and winner) or (fhome_id != home_id and not winner):
-            home_wins += 1
+        elif (fhome == home_id and winner) or (fhome != home_id and not winner):
+            hw += 1
         else:
-            away_wins += 1
-
-    return HeadToHead(
-        total_games=total,
-        home_wins=home_wins,
-        away_wins=away_wins,
-        draws=draws,
-        avg_total_goals=round(total_goals / total, 2),
-        avg_ht_goals=round(total_ht_goals / total, 2),
-    )
+            aw += 1
+    return HeadToHead(total, hw, aw, draws, round(tg / total, 2), round(tht / total, 2))
 
 
-def _default_odds(home_rank: int, away_rank: int) -> dict:
-    """Estimate sensible odds when no live odds available."""
-    strength_diff = (away_rank - home_rank) / 20.0
-    handicap_line = round(min(2.5, max(-2.5, -strength_diff)), 1)
+def _default_football_odds(home_rank: int, away_rank: int) -> dict:
+    diff = (away_rank - home_rank) / 20.0
     return {
-        "handicap_line": handicap_line,
-        "handicap_home_odds": 1.90,
-        "handicap_away_odds": 1.90,
-        "ht_over_line": 0.5 if strength_diff > 1.0 else 1.5,
-        "ht_over_odds": 1.80,
-        "ft_over_line": 2.5,
-        "ft_over_odds": 1.85,
+        "handicap_line":       round(min(2.5, max(-2.5, -diff)), 1),
+        "handicap_home_odds":  1.90,
+        "handicap_away_odds":  1.90,
+        "ht_over_line":        0.5 if diff > 1.0 else 1.5,
+        "ht_over_odds":        1.80,
+        "ft_over_line":        2.5,
+        "ft_over_odds":        1.85,
     }
 
 
-# ── Main public interface ─────────────────────────────────────────────────────
+def _default_basketball_odds(home_rank: int, away_rank: int) -> dict:
+    spread = round(min(10.0, max(-10.0, (away_rank - home_rank) * 0.5)), 1)
+    return {
+        "handicap_line":       -spread,
+        "handicap_home_odds":  1.90,
+        "handicap_away_odds":  1.90,
+        "ht_over_line":        110.5,
+        "ht_over_odds":        1.87,
+        "ft_over_line":        225.5,
+        "ft_over_odds":        1.87,
+    }
+
+
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def get_today_football_games() -> list[Game]:
-    """
-    Return today's football games as Game objects ready for analysis.
-    Uses live API if key is set, otherwise returns demo data.
-    """
-    key = _api_key()
-    if not key:
-        print("[INFO] No API_FOOTBALL_KEY found — using demo data.")
-        print("[INFO] Get a free key at: https://dashboard.api-football.com/register")
+    if not _api_key():
+        print("[INFO] No API key — using demo football data.")
         return demo.FOOTBALL_GAMES
 
-    if not REQUESTS_OK:
-        print("[WARN] `requests` not installed. Using demo data.")
+    print(f"[API] Fetching today's football fixtures ({datetime.date.today()})…")
+    raw = fetch_today_football_fixtures()
+    if not raw:
+        print("[API] No football fixtures today — using demo data.")
         return demo.FOOTBALL_GAMES
 
-    print(f"[API] Fetching today's fixtures ({datetime.date.today()})...")
-    raw_fixtures = fetch_today_fixtures()
+    print(f"[API] {len(raw)} football fixture(s) found.")
+    games, seen = [], set()
 
-    if not raw_fixtures:
-        print("[API] No fixtures found for today — using demo data.")
-        return demo.FOOTBALL_GAMES
-
-    print(f"[API] Found {len(raw_fixtures)} fixture(s). Fetching team stats...")
-
-    games: list[Game] = []
-    seen = set()
-
-    for fix in raw_fixtures:
+    for fix in raw:
         try:
-            fixture_id = fix["fixture"]["id"]
-            if fixture_id in seen:
-                continue
-            seen.add(fixture_id)
+            fid = fix["fixture"]["id"]
+            if fid in seen: continue
+            seen.add(fid)
 
-            league_id = fix["league"]["id"]
-            league_name = WATCHED_LEAGUES.get(league_id, ("Unknown", ""))[0]
+            lid   = fix["league"]["id"]
+            lname = WATCHED_FOOTBALL_LEAGUES.get(lid, ("Unknown",))[0]
+            home  = fix["teams"]["home"]
+            away  = fix["teams"]["away"]
 
-            home = fix["teams"]["home"]
-            away = fix["teams"]["away"]
-            home_id, away_id = home["id"], away["id"]
+            h2h      = fetch_football_h2h(home["id"], away["id"])
+            h_stats  = fetch_football_team_stats(lid, home["id"])
+            a_stats  = fetch_football_team_stats(lid, away["id"])
+            h_form   = _parse_football_form(h2h, home["id"]) or ["W","D","W","L","W"]
+            a_form   = _parse_football_form(h2h, away["id"]) or ["L","W","L","D","L"]
 
-            # Get team stats (cached after first call)
-            home_stats_raw = fetch_team_stats(league_id, home_id)
-            away_stats_raw = fetch_team_stats(league_id, away_id)
+            rnd     = fix.get("league", {}).get("round", "10").split("-")[-1].strip()
+            h_rank  = int(rnd) if rnd.isdigit() else 10
+            a_rank  = h_rank + 3
 
-            # Get H2H
-            h2h_fixtures = fetch_h2h(home_id, away_id)
-
-            # Build form from H2H + recent fixtures (simplified)
-            home_form = _parse_form(h2h_fixtures, home_id)
-            away_form = _parse_form(h2h_fixtures, away_id)
-
-            # Rank approximation from league standing (not fetched to save calls)
-            home_rank = fix.get("league", {}).get("round", "Regular Season - 1").split("-")[-1].strip()
-            home_rank = int(home_rank) if str(home_rank).isdigit() else 10
-            away_rank = home_rank + 3
-
-            home_team = _build_team_stats(home["name"], home_rank, home_stats_raw, home_form or ["W", "D", "W", "L", "W"])
-            away_team = _build_team_stats(away["name"], away_rank, away_stats_raw, away_form or ["L", "W", "L", "D", "L"])
-            h2h = _build_h2h(h2h_fixtures, home_id)
-
-            odds = _default_odds(home_rank, away_rank)
-
-            game = Game(
-                id=f"live_{fixture_id}",
+            games.append(Game(
+                id=f"live_{fid}",
                 sport=Sport.FOOTBALL,
-                league=league_name,
-                home_team=home_team,
-                away_team=away_team,
-                h2h=h2h,
-                **odds,
-            )
-            games.append(game)
-
+                league=lname,
+                home_team=_build_football_team(home["name"], h_rank, h_stats, h_form),
+                away_team=_build_football_team(away["name"], a_rank, a_stats, a_form),
+                h2h=_build_football_h2h(h2h, home["id"]),
+                **_default_football_odds(h_rank, a_rank),
+            ))
         except Exception as e:
-            print(f"[WARN] Skipping fixture: {e}")
-            continue
+            print(f"[WARN] Skipping football fixture: {e}")
 
-    print(f"[API] Built {len(games)} game model(s) for analysis.")
-    return games if games else demo.FOOTBALL_GAMES
+    print(f"[API] Built {len(games)} football game(s).")
+    return games or demo.FOOTBALL_GAMES
+
+
+def get_today_basketball_games() -> list[Game]:
+    if not _api_key():
+        print("[INFO] No API key — using demo basketball data.")
+        return demo.BASKETBALL_GAMES
+
+    print(f"[API] Fetching today's basketball games ({datetime.date.today()})…")
+    raw = fetch_today_basketball_fixtures()
+
+    if not raw:
+        print("[API] No basketball games today — using demo data.")
+        return demo.BASKETBALL_GAMES
+
+    print(f"[API] {len(raw)} basketball game(s) found.")
+    games, seen = [], set()
+
+    for g in raw:
+        try:
+            gid    = g["id"]
+            if gid in seen: continue
+            seen.add(gid)
+
+            lid    = g["league"]["id"]
+            lname  = WATCHED_BASKETBALL_LEAGUES.get(lid, ("Basketball",))[0]
+            home   = g["teams"]["home"]
+            away   = g["teams"]["away"]
+
+            h_stats = fetch_basketball_team_stats(lid, home["id"])
+            a_stats = fetch_basketball_team_stats(lid, away["id"])
+
+            # Rank by standing position if available, else default
+            h_rank = _safe(home.get("standing", {}).get("position")) or 8
+            a_rank = _safe(away.get("standing", {}).get("position")) or 8
+            h_rank, a_rank = int(h_rank), int(a_rank)
+
+            games.append(Game(
+                id=f"live_bb_{gid}",
+                sport=Sport.BASKETBALL,
+                league=lname,
+                home_team=_build_basketball_team(home["name"], h_rank, h_stats, ["W","W","L","W","D"]),
+                away_team=_build_basketball_team(away["name"], a_rank, a_stats, ["L","W","L","D","W"]),
+                h2h=HeadToHead(0, 0, 0, 0, 220.0, 108.0),
+                **_default_basketball_odds(h_rank, a_rank),
+            ))
+        except Exception as e:
+            print(f"[WARN] Skipping basketball game: {e}")
+
+    print(f"[API] Built {len(games)} basketball game(s).")
+    return games or demo.BASKETBALL_GAMES
 
 
 def get_all_today_games() -> list[Game]:
-    """All sports: live football + demo basketball/tennis."""
-    football = get_today_football_games()
-    basketball = demo.BASKETBALL_GAMES   # Live NBA API requires separate key
-    tennis = demo.TENNIS_MATCHES         # Live ATP/WTA API requires separate key
+    """All sports: live football + live basketball + demo tennis."""
+    football   = get_today_football_games()
+    basketball = get_today_basketball_games()
+    tennis     = demo.TENNIS_MATCHES
     return football + basketball + tennis

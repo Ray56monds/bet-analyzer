@@ -121,6 +121,7 @@ def api_games():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("FLASK_PORT", 5000))
+    port = int(os.getenv("PORT", os.getenv("FLASK_PORT", 5000)))
+    debug = os.getenv("RENDER") is None  # disable debug on Render
     print(f"\n  Bet Analyzer running at http://localhost:{port}\n")
-    app.run(debug=True, port=port)
+    app.run(debug=debug, host="0.0.0.0", port=port)

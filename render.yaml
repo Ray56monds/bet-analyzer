@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bet-analyzer
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: API_FOOTBALL_KEY
+        sync: false          # You set this manually in Render dashboard
+      - key: FLASK_SECRET_KEY
+        generateValue: true  # Render auto-generates a secure random value
+    autoDeploy: true         # Redeploys automatically on every git push

@@ -27,6 +27,7 @@ from models import Game, Sport, TeamStats, HeadToHead
 
 FOOTBALL_BASE   = "https://v3.football.api-sports.io"
 BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
+TENNIS_BASE     = "https://v1.tennis.api-sports.io"
 
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -52,6 +53,7 @@ WATCHED_BASKETBALL_LEAGUES = {
 
 FOOTBALL_SEASON   = 2025        # 2025-2026 European season
 BASKETBALL_SEASON = "2025-2026"  # Current NBA season
+TENNIS_SEASON     = 2026         # Current ATP/WTA season
 
 
 # ── Core HTTP ─────────────────────────────────────────────────────────────────
@@ -101,6 +103,7 @@ def _get(base_url: str, endpoint: str, params: dict) -> dict | None:
 
 def _fg(endpoint, params): return _get(FOOTBALL_BASE,   endpoint, params)
 def _bg(endpoint, params): return _get(BASKETBALL_BASE, endpoint, params)
+def _tg(endpoint, params): return _get(TENNIS_BASE,     endpoint, params)
 
 
 # ── Football fetchers ─────────────────────────────────────────────────────────
@@ -362,6 +365,9 @@ def get_today_football_games() -> list[Game]:
                 id=f"live_{fid}",
                 sport=Sport.FOOTBALL,
                 league=lname,
+                kick_off=fix.get("fixture", {}).get("date", ""),
+                home_logo=home.get("logo", ""),
+                away_logo=away.get("logo", ""),
                 home_team=_build_football_team(home["name"], h_rank, h_stats, h_form),
                 away_team=_build_football_team(away["name"], a_rank, a_stats, a_form),
                 h2h=_build_football_h2h(h2h, home["id"]),
@@ -410,6 +416,9 @@ def get_today_basketball_games() -> list[Game]:
                 id=f"live_bb_{gid}",
                 sport=Sport.BASKETBALL,
                 league=lname,
+                kick_off=g.get("date", ""),
+                home_logo=home.get("logo", ""),
+                away_logo=away.get("logo", ""),
                 home_team=_build_basketball_team(home["name"], h_rank, h_stats, ["W","W","L","W","D"]),
                 away_team=_build_basketball_team(away["name"], a_rank, a_stats, ["L","W","L","D","W"]),
                 h2h=HeadToHead(0, 0, 0, 0, 220.0, 108.0),
@@ -422,6 +431,147 @@ def get_today_basketball_games() -> list[Game]:
     return games
 
 
+def fetch_today_tennis_fixtures() -> list[dict]:
+    """Return today's tennis matches from ATP/WTA tours."""
+    cached = _load_cache("tn_games_today")
+    if cached is not None:
+        return cached
+
+    today = datetime.date.today().isoformat()
+    data  = _tg("games", {"date": today})
+    results = data.get("response", []) if data else []
+
+    if results:
+        _save_cache("tn_games_today", results)
+    return results
+
+
+def fetch_tennis_player_stats(player_id: int) -> dict | None:
+    name = f"tn_stats_{player_id}"
+    cached = _load_cache(name)
+    if cached is not None:
+        return cached
+    data = _tg("players/statistics", {"id": player_id, "season": TENNIS_SEASON})
+    if data and "response" in data and data["response"]:
+        result = data["response"][0] if isinstance(data["response"], list) else data["response"]
+        _save_cache(name, result)
+        return result
+    return None
+
+
+def _build_tennis_team(name: str, rank: int, stats: dict | None,
+                       form: list[str], logo: str = "") -> TeamStats:
+    """Map tennis player stats to TeamStats. avg_scored = games won/set."""
+    if stats is None:
+        # Estimate from ranking: top 10 win ~6 games/set, rank 100 ~5
+        won = max(4.5, 6.2 - rank * 0.015)
+        lost = 10.0 - won
+        return TeamStats(
+            name=name, form=form,
+            avg_scored=won, avg_conceded=lost,
+            home_avg_scored=won, home_avg_conceded=lost,
+            away_avg_scored=won, away_avg_conceded=lost,
+            rank=rank,
+            ht_avg_scored=won, ht_avg_conceded=lost,
+        )
+
+    # api-tennis stats object
+    games = stats.get("games", {})
+    won_pct  = _safe(games.get("win"))   / 100.0 if games.get("win")  else 0.55
+    sets     = stats.get("sets", {})
+    avg_won  = _safe(sets.get("win"))    or 1.2
+    avg_lost = _safe(sets.get("lose"))   or 0.8
+
+    # Approximate games won/lost per set from win %
+    games_won  = max(4.0, min(6.5, 5.0 + (won_pct - 0.5) * 4.0))
+    games_lost = 10.0 - games_won
+
+    return TeamStats(
+        name=name, form=form,
+        avg_scored=games_won, avg_conceded=games_lost,
+        home_avg_scored=games_won, home_avg_conceded=games_lost,
+        away_avg_scored=games_won, away_avg_conceded=games_lost,
+        rank=rank,
+        ht_avg_scored=games_won, ht_avg_conceded=games_lost,
+    )
+
+
+def _tennis_surface(surface_str: str | None) -> str | None:
+    if not surface_str:
+        return None
+    s = surface_str.lower()
+    if "clay" in s:   return "clay"
+    if "grass" in s:  return "grass"
+    if "hard" in s:   return "hard"
+    return None
+
+
+def get_today_tennis_games() -> list[Game]:
+    """Live tennis matches only."""
+    if not _api_key():
+        print("[INFO] No API key — tennis disabled.")
+        return []
+
+    print(f"[API] Fetching today's tennis matches ({datetime.date.today()})…")
+    raw = fetch_today_tennis_fixtures()
+    if not raw:
+        print("[API] No tennis matches scheduled today.")
+        return []
+
+    print(f"[API] {len(raw)} tennis match(es) found.")
+    games, seen = [], set()
+
+    for match in raw:
+        try:
+            mid  = match["id"]
+            if mid in seen: continue
+            seen.add(mid)
+
+            home   = match["players"]["home"]
+            away   = match["players"]["away"]
+            league = match.get("league", {})
+            tour   = league.get("name", "ATP/WTA")
+            surface = _tennis_surface(match.get("game", {}).get("surface"))
+            kick_off = match.get("date", "")
+
+            h_rank = int(_safe(home.get("ranking")) or 50)
+            a_rank = int(_safe(away.get("ranking")) or 50)
+
+            h_stats = fetch_tennis_player_stats(home["id"])
+            a_stats = fetch_tennis_player_stats(away["id"])
+
+            # Form from recent results not available in basic response — use ranking
+            h_form = ["W","W","L","W","W"] if h_rank < a_rank else ["W","L","W","L","W"]
+            a_form = ["L","W","L","W","L"] if h_rank < a_rank else ["W","L","W","W","L"]
+
+            games.append(Game(
+                id=f"live_tn_{mid}",
+                sport=Sport.TENNIS,
+                league=tour,
+                surface=surface,
+                kick_off=kick_off,
+                home_logo=home.get("logo", ""),
+                away_logo=away.get("logo", ""),
+                home_team=_build_tennis_team(home["name"], h_rank, h_stats, h_form),
+                away_team=_build_tennis_team(away["name"], a_rank, a_stats, a_form),
+                h2h=HeadToHead(0, 0, 0, 0, 21.0, 10.0),
+                handicap_line=-1.5 if h_rank < a_rank else 1.5,
+                handicap_home_odds=1.75 if h_rank < a_rank else 2.10,
+                handicap_away_odds=2.10 if h_rank < a_rank else 1.75,
+                ht_over_line=10.5, ht_over_odds=1.88,
+                ft_over_line=21.5, ft_over_odds=1.85,
+            ))
+        except Exception as e:
+            print(f"[WARN] Skipping tennis match: {e}")
+
+    print(f"[API] Built {len(games)} tennis game(s).")
+    return games
+
+
 def get_all_today_games() -> list[Game]:
-    """All live sports combined — no demo/static data."""
-    return get_today_football_games() + get_today_basketball_games()
+    """All live sports combined — football, basketball, tennis."""
+    return (
+        get_today_football_games()
+        + get_today_basketball_games()
+        + get_today_tennis_games()
+    )

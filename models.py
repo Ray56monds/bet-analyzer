@@ -58,9 +58,12 @@ class Game:
     home_team: TeamStats
     away_team: TeamStats
     h2h: HeadToHead
-    is_home_match: bool = True  # True = neutral/standard home advantage
-    surface: Optional[str] = None  # For tennis: 'clay', 'grass', 'hard'
+    is_home_match: bool = True
+    surface: Optional[str] = None       # For tennis: 'clay', 'grass', 'hard'
     league: Optional[str] = None
+    kick_off: Optional[str] = None      # ISO datetime string e.g. "2026-04-08T19:45:00+00:00"
+    home_logo: Optional[str] = None     # URL to team/player logo
+    away_logo: Optional[str] = None
 
     # Odds provided by any bookmaker
     handicap_line: float = 0.0        # e.g. -1.5 means home gives 1.5 goal start
